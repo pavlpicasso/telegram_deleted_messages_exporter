@@ -18,6 +18,16 @@ TELEGRAM_API_HASH=
 TELEGRAM_CHAT=@your_group_or_channel
 ```
 
+Get `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from Telegram's official app
+management page:
+
+1. Open <https://my.telegram.org/apps>.
+2. Log in with the phone number connected to your Telegram account.
+3. Open **API development tools** and create an app if you do not have one yet.
+4. Copy `api_id` to `TELEGRAM_API_ID` and `api_hash` to `TELEGRAM_API_HASH`.
+
+Do not commit `config/secrets.env`; it contains account-specific credentials.
+
 `config/secrets.env`, Telegram sessions, JSON exports, IDE files, caches, and
 build outputs are ignored by git.
 
@@ -35,6 +45,9 @@ telegram-deleted-export --all --with-links
 telegram-deleted-export --text-only --min-text-length 20
 telegram-deleted-export --all --download-media --media-dir media
 telegram-deleted-export --incremental --all --with-links
+telegram-deleted-export --sender-id 123456789 --deleted-by 987654321
+telegram-deleted-export --has-media
+telegram-deleted-export --has-links --with-links
 ```
 
 `--all` sets the minimum text length to `0`. `--text-only` skips media-only
@@ -42,6 +55,8 @@ messages. `--with-links` adds extracted links to each JSON item.
 `--download-media` saves available media files and writes their paths to JSON.
 `--incremental` merges with the existing output file and skips duplicate
 `delete_event_id` values.
+`--sender-id`, `--deleted-by`, `--has-media`, and `--has-links` filter the
+deleted messages that are exported.
 
 ## Diagnostics
 

@@ -30,6 +30,10 @@ class ExportConfigTests(unittest.TestCase):
                     "TELEGRAM_MIN_TEXT_LENGTH=42",
                     "TELEGRAM_OUTPUT_FILE=deleted_test.json",
                     "TELEGRAM_INCREMENTAL=false",
+                    "TELEGRAM_SENDER_ID=",
+                    "TELEGRAM_DELETED_BY=",
+                    "TELEGRAM_HAS_MEDIA=false",
+                    "TELEGRAM_HAS_LINKS=false",
                     extra,
                 ]
             ),
@@ -79,6 +83,12 @@ class ExportConfigTests(unittest.TestCase):
                     "media_test",
                     "--output",
                     "out.json",
+                    "--sender-id",
+                    "111",
+                    "--deleted-by",
+                    "222",
+                    "--has-media",
+                    "--has-links",
                 ]
             )
 
@@ -92,6 +102,10 @@ class ExportConfigTests(unittest.TestCase):
             self.assertTrue(config.incremental)
             self.assertEqual(config.media_dir, Path("media_test"))
             self.assertEqual(config.output_file, Path("out.json"))
+            self.assertEqual(config.sender_id, 111)
+            self.assertEqual(config.deleted_by, 222)
+            self.assertTrue(config.has_media)
+            self.assertTrue(config.has_links)
 
     def test_bool_env_rejects_invalid_values(self):
         with patch.dict(os.environ, {"TELEGRAM_WITH_LINKS": "maybe"}, clear=True):

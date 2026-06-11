@@ -23,6 +23,10 @@ class ExportConfig:
     download_media: bool
     media_dir: Path
     incremental: bool
+    sender_id: int | None
+    deleted_by: int | None
+    has_media: bool
+    has_links: bool
 
 
 def load_env_file(path):
@@ -59,6 +63,16 @@ def required_env(name, config_file):
 def int_env(name, default):
     try:
         return int(os.environ.get(name, default))
+    except ValueError:
+        raise SystemExit(f"Invalid {name}: expected integer.")
+
+
+def optional_int_env(name):
+    value = os.environ.get(name)
+    if not value:
+        return None
+    try:
+        return int(value)
     except ValueError:
         raise SystemExit(f"Invalid {name}: expected integer.")
 
@@ -209,6 +223,7 @@ def collect_deleted_messages(
     checked_events = 0
     checked_deleted_messages = 0
     skipped_by_text_filter = 0
+    skipped_by_export_filter = 0
 
     for event in client.iter_admin_log(entity, limit=config.limit, delete=True):
         checked_events += 1
@@ -223,6 +238,7 @@ def collect_deleted_messages(
 
         checked_deleted_messages += 1
         text = message.message or ""
+        current_sender_id = sender_id(message)
         has_text = bool(text.strip())
         has_media = getattr(message, "media", None) is not None
 
@@ -232,6 +248,23 @@ def collect_deleted_messages(
         include_for_media_download = config.download_media and has_media
         if len(text) < config.min_text_length and not include_for_media_download:
             skipped_by_text_filter += 1
+            continue
+
+        if config.sender_id is not None and current_sender_id != config.sender_id:
+            skipped_by_export_filter += 1
+            continue
+        if config.deleted_by is not None and event.user_id != config.deleted_by:
+            skipped_by_export_filter += 1
+            continue
+        if config.has_media and not has_media:
+            skipped_by_export_filter += 1
+            continue
+
+        links = None
+        if config.with_links or config.has_links:
+            links = extract_links(message)
+        if config.has_links and not links:
+            skipped_by_export_filter += 1
             continue
 
         media_result = None
@@ -244,7 +277,7 @@ def collect_deleted_messages(
             "deleted_by": event.user_id,
             "message_id": message.id,
             "message_date": str(message.date),
-            "sender_id": sender_id(message),
+            "sender_id": current_sender_id,
             "text_length": len(text),
             "text": text,
             "has_media": has_media,
@@ -254,7 +287,7 @@ def collect_deleted_messages(
         if media is not None:
             item["media"] = media
         if config.with_links:
-            item["links"] = extract_links(message)
+            item["links"] = links or []
 
         deleted_messages.append(item)
 
@@ -270,6 +303,7 @@ def collect_deleted_messages(
     print(f"Checked admin-log events: {checked_events}")
     print(f"Checked deleted messages: {checked_deleted_messages}")
     print(f"Skipped by text filter: {skipped_by_text_filter}")
+    print(f"Skipped by export filters: {skipped_by_export_filter}")
     print(f"Minimum text length: {config.min_text_length}")
 
     return deleted_messages
@@ -382,6 +416,26 @@ def build_parser():
         help="Merge with the existing output file and skip duplicate delete events.",
     )
     parser.add_argument(
+        "--sender-id",
+        type=int,
+        help="Export only messages sent by this Telegram user/channel id.",
+    )
+    parser.add_argument(
+        "--deleted-by",
+        type=int,
+        help="Export only messages deleted by this Telegram user id.",
+    )
+    parser.add_argument(
+        "--has-media",
+        action="store_true",
+        help="Export only deleted messages that include media.",
+    )
+    parser.add_argument(
+        "--has-links",
+        action="store_true",
+        help="Export only deleted messages that include links.",
+    )
+    parser.add_argument(
         "--media-dir",
         help="Directory for media downloaded with --download-media.",
     )
@@ -420,6 +474,14 @@ def load_config(args):
         download_media=args.download_media or bool_env("TELEGRAM_DOWNLOAD_MEDIA"),
         media_dir=Path(args.media_dir or os.environ.get("TELEGRAM_MEDIA_DIR", "media")),
         incremental=args.incremental or bool_env("TELEGRAM_INCREMENTAL"),
+        sender_id=args.sender_id
+        if args.sender_id is not None
+        else optional_int_env("TELEGRAM_SENDER_ID"),
+        deleted_by=args.deleted_by
+        if args.deleted_by is not None
+        else optional_int_env("TELEGRAM_DELETED_BY"),
+        has_media=args.has_media or bool_env("TELEGRAM_HAS_MEDIA"),
+        has_links=args.has_links or bool_env("TELEGRAM_HAS_LINKS"),
     )
 
 
