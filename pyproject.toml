@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telegram-deleted-messages"
+version = "0.1.0"
+description = "Export deleted Telegram messages from a chat admin log."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "Telethon>=1.36,<2",
+]
+
+[project.scripts]
+telegram-deleted-export = "telegram_deleted_messages.export:main"
+telegram-format-messages = "telegram_deleted_messages.formatter:main"
+
+[tool.setuptools.packages.find]
+include = ["telegram_deleted_messages*"]
+
+[tool.unittest]
+test-discovery = "tests"

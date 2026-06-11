@@ -1,0 +1,46 @@
+# Local secrets and runtime config
+.env
+.env.*
+!.env.example
+config/*.env
+!config/*.env.example
+config/*.local.*
+
+# Telegram sessions
+*.session
+*.session-journal
+*.session-shm
+*.session-wal
+config/*.session
+config/*.session-journal
+config/*.session-shm
+config/*.session-wal
+
+# Exported data
+deleted_*.json
+telegram_messages*.txt
+downloads/
+media/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.python-version
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
