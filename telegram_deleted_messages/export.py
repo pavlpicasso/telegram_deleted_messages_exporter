@@ -1,7 +1,7 @@
 import argparse
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -22,6 +22,7 @@ class ExportConfig:
     with_links: bool
     download_media: bool
     media_dir: Path
+    incremental: bool
 
 
 def load_env_file(path):
@@ -274,6 +275,71 @@ def collect_deleted_messages(
     return deleted_messages
 
 
+def message_key(message):
+    key = message.get("delete_event_id")
+    if key is not None:
+        return ("delete_event_id", key)
+    return ("message_id", message.get("message_id"))
+
+
+def load_existing_messages(path):
+    if not path.exists():
+        return []
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("messages"), list):
+        return data["messages"]
+    raise SystemExit(f"Invalid existing export file: {path}")
+
+
+def merge_messages(existing_messages, new_messages):
+    merged = []
+    seen = set()
+    skipped_duplicates = 0
+
+    for message in existing_messages:
+        key = message_key(message)
+        if key in seen:
+            skipped_duplicates += 1
+            continue
+        seen.add(key)
+        merged.append(message)
+
+    added = 0
+    for message in new_messages:
+        key = message_key(message)
+        if key in seen:
+            skipped_duplicates += 1
+            continue
+        seen.add(key)
+        merged.append(message)
+        added += 1
+
+    return merged, added, skipped_duplicates
+
+
+def write_export(config, messages):
+    if not config.incremental:
+        config.output_file.write_text(
+            json.dumps(messages, ensure_ascii=False, indent=4),
+            encoding="utf-8",
+        )
+        return messages, len(messages), 0
+
+    existing_messages = load_existing_messages(config.output_file)
+    merged_messages, added, skipped_duplicates = merge_messages(
+        existing_messages,
+        messages,
+    )
+    config.output_file.write_text(
+        json.dumps(merged_messages, ensure_ascii=False, indent=4),
+        encoding="utf-8",
+    )
+    return merged_messages, added, skipped_duplicates
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         description="Export deleted Telegram messages from a chat admin log."
@@ -309,6 +375,11 @@ def build_parser():
         "--download-media",
         action="store_true",
         help="Download media from deleted messages when Telegram still provides it.",
+    )
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Merge with the existing output file and skip duplicate delete events.",
     )
     parser.add_argument(
         "--media-dir",
@@ -348,6 +419,7 @@ def load_config(args):
         with_links=args.with_links or bool_env("TELEGRAM_WITH_LINKS"),
         download_media=args.download_media or bool_env("TELEGRAM_DOWNLOAD_MEDIA"),
         media_dir=Path(args.media_dir or os.environ.get("TELEGRAM_MEDIA_DIR", "media")),
+        incremental=args.incremental or bool_env("TELEGRAM_INCREMENTAL"),
     )
 
 
@@ -386,9 +458,9 @@ def export_deleted_messages(config):
                 config,
             )
 
-            config.output_file.write_text(
-                json.dumps(deleted_messages, ensure_ascii=False, indent=4),
-                encoding="utf-8",
+            exported_messages, added, skipped_duplicates = write_export(
+                config,
+                deleted_messages,
             )
 
     except ChatAdminRequiredError:
@@ -404,8 +476,67 @@ def export_deleted_messages(config):
     except RPCError as exc:
         raise SystemExit(f"Telegram API error: {type(exc).__name__}: {exc}")
 
-    print(f"Exported deleted messages: {len(deleted_messages)}")
+    print(f"Exported deleted messages this run: {len(deleted_messages)}")
+    if config.incremental:
+        print(f"New messages added: {added}")
+        print(f"Duplicates skipped: {skipped_duplicates}")
+        print(f"Total messages in file: {len(exported_messages)}")
     print(f"File '{config.output_file}' saved.")
+
+
+def build_smoke_test_parser():
+    parser = argparse.ArgumentParser(
+        description="Run a small real Telegram export to verify configuration."
+    )
+    parser.add_argument(
+        "--config",
+        default=os.environ.get("TELEGRAM_CONFIG_FILE", str(DEFAULT_CONFIG_FILE)),
+        help="Path to env file with Telegram settings.",
+    )
+    parser.add_argument("--chat", help="Telegram group/channel username or id.")
+    parser.add_argument("--session", help="Telethon session path without extension.")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Admin log events limit for the smoke test.",
+    )
+    parser.add_argument(
+        "--output",
+        default="deleted_smoke_test.json",
+        help="Smoke-test JSON output path.",
+    )
+    return parser
+
+
+def smoke_test_main(argv=None):
+    args = build_smoke_test_parser().parse_args(argv)
+    export_args = build_parser().parse_args(
+        [
+            "--config",
+            args.config,
+            "--limit",
+            str(args.limit),
+            "--all",
+            "--with-links",
+            "--output",
+            args.output,
+        ]
+    )
+    if args.chat:
+        export_args.chat = args.chat
+    if args.session:
+        export_args.session = args.session
+
+    config = load_config(export_args)
+    config = replace(
+        config,
+        download_media=False,
+        incremental=False,
+        min_text_length=0,
+        with_links=True,
+    )
+    export_deleted_messages(config)
 
 
 def main(argv=None):

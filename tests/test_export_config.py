@@ -9,6 +9,10 @@ from telegram_deleted_messages.export import (
     build_parser,
     load_config,
     load_env_file,
+    load_existing_messages,
+    merge_messages,
+    smoke_test_main,
+    write_export,
 )
 
 
@@ -25,6 +29,7 @@ class ExportConfigTests(unittest.TestCase):
                     "TELEGRAM_ADMIN_LOG_LIMIT=250",
                     "TELEGRAM_MIN_TEXT_LENGTH=42",
                     "TELEGRAM_OUTPUT_FILE=deleted_test.json",
+                    "TELEGRAM_INCREMENTAL=false",
                     extra,
                 ]
             ),
@@ -69,6 +74,7 @@ class ExportConfigTests(unittest.TestCase):
                     "--text-only",
                     "--with-links",
                     "--download-media",
+                    "--incremental",
                     "--media-dir",
                     "media_test",
                     "--output",
@@ -83,6 +89,7 @@ class ExportConfigTests(unittest.TestCase):
             self.assertTrue(config.text_only)
             self.assertTrue(config.with_links)
             self.assertTrue(config.download_media)
+            self.assertTrue(config.incremental)
             self.assertEqual(config.media_dir, Path("media_test"))
             self.assertEqual(config.output_file, Path("out.json"))
 
@@ -90,6 +97,80 @@ class ExportConfigTests(unittest.TestCase):
         with patch.dict(os.environ, {"TELEGRAM_WITH_LINKS": "maybe"}, clear=True):
             with self.assertRaises(SystemExit):
                 bool_env("TELEGRAM_WITH_LINKS")
+
+    def test_incremental_write_merges_existing_export(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "deleted.json"
+            output.write_text(
+                '[{"delete_event_id": 1, "text": "old"}]',
+                encoding="utf-8",
+            )
+            config_file = self.write_config(tmp)
+            parser = build_parser()
+
+            with patch.dict(os.environ, {}, clear=True):
+                config = load_config(
+                    parser.parse_args(
+                        [
+                            "--config",
+                            str(config_file),
+                            "--incremental",
+                            "--output",
+                            str(output),
+                        ]
+                    )
+                )
+
+            merged, added, skipped = write_export(
+                config,
+                [
+                    {"delete_event_id": 1, "text": "duplicate"},
+                    {"delete_event_id": 2, "text": "new"},
+                ],
+            )
+
+            self.assertEqual(added, 1)
+            self.assertEqual(skipped, 1)
+            self.assertEqual([item["delete_event_id"] for item in merged], [1, 2])
+            self.assertEqual(load_existing_messages(output), merged)
+
+    def test_merge_messages_deduplicates_existing_duplicates(self):
+        merged, added, skipped = merge_messages(
+            [
+                {"delete_event_id": 1, "text": "first"},
+                {"delete_event_id": 1, "text": "duplicate"},
+            ],
+            [{"delete_event_id": 2, "text": "new"}],
+        )
+
+        self.assertEqual(added, 1)
+        self.assertEqual(skipped, 1)
+        self.assertEqual([item["delete_event_id"] for item in merged], [1, 2])
+
+    def test_smoke_test_main_builds_small_export_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_file = self.write_config(tmp)
+            output = Path(tmp) / "smoke.json"
+
+            with patch("telegram_deleted_messages.export.export_deleted_messages") as export:
+                smoke_test_main(
+                    [
+                        "--config",
+                        str(config_file),
+                        "--limit",
+                        "7",
+                        "--output",
+                        str(output),
+                    ]
+                )
+
+            config = export.call_args.args[0]
+            self.assertEqual(config.limit, 7)
+            self.assertEqual(config.output_file, output)
+            self.assertEqual(config.min_text_length, 0)
+            self.assertTrue(config.with_links)
+            self.assertFalse(config.download_media)
+            self.assertFalse(config.incremental)
 
 
 if __name__ == "__main__":

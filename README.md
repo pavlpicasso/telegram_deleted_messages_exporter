@@ -34,11 +34,37 @@ Useful export flags:
 telegram-deleted-export --all --with-links
 telegram-deleted-export --text-only --min-text-length 20
 telegram-deleted-export --all --download-media --media-dir media
+telegram-deleted-export --incremental --all --with-links
 ```
 
 `--all` sets the minimum text length to `0`. `--text-only` skips media-only
 messages. `--with-links` adds extracted links to each JSON item.
 `--download-media` saves available media files and writes their paths to JSON.
+`--incremental` merges with the existing output file and skips duplicate
+`delete_event_id` values.
+
+## Diagnostics
+
+Check local dependencies, config, and session file:
+
+```powershell
+telegram-deleted-doctor
+```
+
+Also verify saved Telegram authorization and chat access:
+
+```powershell
+telegram-deleted-doctor --connect
+```
+
+Run a small real export with safe defaults:
+
+```powershell
+telegram-deleted-smoke-test
+```
+
+The smoke test uses `--limit 20`, `--all`, `--with-links`, writes
+`deleted_smoke_test.json`, and does not download media.
 
 After editable install, the same tools are available as console commands:
 

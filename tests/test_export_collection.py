@@ -71,6 +71,7 @@ class ExportCollectionTests(unittest.TestCase):
             "with_links": False,
             "download_media": False,
             "media_dir": Path("media"),
+            "incremental": False,
         }
         values.update(overrides)
         return ExportConfig(**values)

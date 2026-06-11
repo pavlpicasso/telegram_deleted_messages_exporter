@@ -14,6 +14,8 @@ dependencies = [
 
 [project.scripts]
 telegram-deleted-export = "telegram_deleted_messages.export:main"
+telegram-deleted-smoke-test = "telegram_deleted_messages.export:smoke_test_main"
+telegram-deleted-doctor = "telegram_deleted_messages.doctor:main"
 telegram-format-messages = "telegram_deleted_messages.formatter:main"
 
 [tool.setuptools.packages.find]
