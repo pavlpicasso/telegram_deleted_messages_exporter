@@ -27,6 +27,9 @@ class ExportConfig:
     deleted_by: int | None
     has_media: bool
     has_links: bool
+    sort_by: str
+    sort_order: str
+    resolve_users: bool
 
 
 def load_env_file(path):
@@ -133,6 +136,48 @@ def sender_id(message):
     return getattr(from_id, "user_id", None) or getattr(from_id, "channel_id", None)
 
 
+def display_name(entity):
+    title = getattr(entity, "title", None)
+    if title:
+        return title
+
+    parts = [
+        getattr(entity, "first_name", None),
+        getattr(entity, "last_name", None),
+    ]
+    name = " ".join(part for part in parts if part)
+    return name or None
+
+
+def entity_summary(entity_id, entity=None, resolve_error=None):
+    return {
+        "id": entity_id,
+        "type": type(entity).__name__ if entity is not None else None,
+        "username": getattr(entity, "username", None) if entity is not None else None,
+        "display_name": display_name(entity) if entity is not None else None,
+        "resolve_error": resolve_error,
+    }
+
+
+def resolve_entity(client, entity_id, cache):
+    if entity_id is None:
+        return None
+    if entity_id in cache:
+        return cache[entity_id]
+
+    try:
+        entity = client.get_entity(entity_id)
+        summary = entity_summary(entity_id, entity=entity)
+    except Exception as exc:
+        summary = entity_summary(
+            entity_id,
+            resolve_error=f"{type(exc).__name__}: {exc}",
+        )
+
+    cache[entity_id] = summary
+    return summary
+
+
 def append_link(links, seen, kind, url, text=None):
     if not url or url in seen:
         return
@@ -224,6 +269,7 @@ def collect_deleted_messages(
     checked_deleted_messages = 0
     skipped_by_text_filter = 0
     skipped_by_export_filter = 0
+    entity_cache = {}
 
     for event in client.iter_admin_log(entity, limit=config.limit, delete=True):
         checked_events += 1
@@ -283,6 +329,10 @@ def collect_deleted_messages(
             "has_media": has_media,
         }
 
+        if config.resolve_users:
+            item["sender"] = resolve_entity(client, current_sender_id, entity_cache)
+            item["deleted_by_user"] = resolve_entity(client, event.user_id, entity_cache)
+
         media = media_summary(message, media_result)
         if media is not None:
             item["media"] = media
@@ -330,31 +380,56 @@ def load_existing_messages(path):
 
 def merge_messages(existing_messages, new_messages):
     merged = []
-    seen = set()
-    skipped_duplicates = 0
+    index_by_key = {}
+    duplicate_count = 0
 
     for message in existing_messages:
         key = message_key(message)
-        if key in seen:
-            skipped_duplicates += 1
+        if key in index_by_key:
+            duplicate_count += 1
             continue
-        seen.add(key)
+        index_by_key[key] = len(merged)
         merged.append(message)
 
     added = 0
     for message in new_messages:
         key = message_key(message)
-        if key in seen:
-            skipped_duplicates += 1
+        index = index_by_key.get(key)
+        if index is not None:
+            duplicate_count += 1
+            merged[index] = {**merged[index], **message}
             continue
-        seen.add(key)
+        index_by_key[key] = len(merged)
         merged.append(message)
         added += 1
 
-    return merged, added, skipped_duplicates
+    return merged, added, duplicate_count
+
+
+def sort_key(message, sort_by):
+    if sort_by == "message-date":
+        return message.get("message_date") or ""
+    if sort_by == "deleted-at":
+        return message.get("deleted_at") or ""
+    if sort_by == "event-id":
+        return message.get("delete_event_id") or 0
+    if sort_by == "message-id":
+        return message.get("message_id") or 0
+    return 0
+
+
+def sort_messages(messages, sort_by, sort_order):
+    if sort_by == "none":
+        return messages
+    return sorted(
+        messages,
+        key=lambda message: sort_key(message, sort_by),
+        reverse=sort_order == "desc",
+    )
 
 
 def write_export(config, messages):
+    messages = sort_messages(messages, config.sort_by, config.sort_order)
     if not config.incremental:
         config.output_file.write_text(
             json.dumps(messages, ensure_ascii=False, indent=4),
@@ -366,6 +441,11 @@ def write_export(config, messages):
     merged_messages, added, skipped_duplicates = merge_messages(
         existing_messages,
         messages,
+    )
+    merged_messages = sort_messages(
+        merged_messages,
+        config.sort_by,
+        config.sort_order,
     )
     config.output_file.write_text(
         json.dumps(merged_messages, ensure_ascii=False, indent=4),
@@ -439,6 +519,21 @@ def build_parser():
         "--media-dir",
         help="Directory for media downloaded with --download-media.",
     )
+    parser.add_argument(
+        "--sort-by",
+        choices=["none", "message-date", "deleted-at", "event-id", "message-id"],
+        help="Sort exported records before writing JSON.",
+    )
+    parser.add_argument(
+        "--sort-order",
+        choices=["asc", "desc"],
+        help="Sort order for --sort-by.",
+    )
+    parser.add_argument(
+        "--resolve-users",
+        action="store_true",
+        help="Resolve sender and deleter ids to usernames/display names when possible.",
+    )
     parser.add_argument("--output", help="JSON output path.")
     parser.add_argument("--session", help="Telethon session path without extension.")
     return parser
@@ -482,6 +577,9 @@ def load_config(args):
         else optional_int_env("TELEGRAM_DELETED_BY"),
         has_media=args.has_media or bool_env("TELEGRAM_HAS_MEDIA"),
         has_links=args.has_links or bool_env("TELEGRAM_HAS_LINKS"),
+        sort_by=args.sort_by or os.environ.get("TELEGRAM_SORT_BY", "none"),
+        sort_order=args.sort_order or os.environ.get("TELEGRAM_SORT_ORDER", "asc"),
+        resolve_users=args.resolve_users or bool_env("TELEGRAM_RESOLVE_USERS"),
     )
 
 
@@ -520,7 +618,7 @@ def export_deleted_messages(config):
                 config,
             )
 
-            exported_messages, added, skipped_duplicates = write_export(
+            exported_messages, added, duplicate_count = write_export(
                 config,
                 deleted_messages,
             )
@@ -541,7 +639,7 @@ def export_deleted_messages(config):
     print(f"Exported deleted messages this run: {len(deleted_messages)}")
     if config.incremental:
         print(f"New messages added: {added}")
-        print(f"Duplicates skipped: {skipped_duplicates}")
+        print(f"Duplicates merged/skipped: {duplicate_count}")
         print(f"Total messages in file: {len(exported_messages)}")
     print(f"File '{config.output_file}' saved.")
 

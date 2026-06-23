@@ -11,6 +11,7 @@ from telegram_deleted_messages.export import (
     load_env_file,
     load_existing_messages,
     merge_messages,
+    sort_messages,
     smoke_test_main,
     write_export,
 )
@@ -34,6 +35,9 @@ class ExportConfigTests(unittest.TestCase):
                     "TELEGRAM_DELETED_BY=",
                     "TELEGRAM_HAS_MEDIA=false",
                     "TELEGRAM_HAS_LINKS=false",
+                    "TELEGRAM_SORT_BY=none",
+                    "TELEGRAM_SORT_ORDER=asc",
+                    "TELEGRAM_RESOLVE_USERS=false",
                     extra,
                 ]
             ),
@@ -89,6 +93,11 @@ class ExportConfigTests(unittest.TestCase):
                     "222",
                     "--has-media",
                     "--has-links",
+                    "--sort-by",
+                    "message-date",
+                    "--sort-order",
+                    "desc",
+                    "--resolve-users",
                 ]
             )
 
@@ -106,6 +115,9 @@ class ExportConfigTests(unittest.TestCase):
             self.assertEqual(config.deleted_by, 222)
             self.assertTrue(config.has_media)
             self.assertTrue(config.has_links)
+            self.assertEqual(config.sort_by, "message-date")
+            self.assertEqual(config.sort_order, "desc")
+            self.assertTrue(config.resolve_users)
 
     def test_bool_env_rejects_invalid_values(self):
         with patch.dict(os.environ, {"TELEGRAM_WITH_LINKS": "maybe"}, clear=True):
@@ -146,6 +158,7 @@ class ExportConfigTests(unittest.TestCase):
             self.assertEqual(added, 1)
             self.assertEqual(skipped, 1)
             self.assertEqual([item["delete_event_id"] for item in merged], [1, 2])
+            self.assertEqual(merged[0]["text"], "duplicate")
             self.assertEqual(load_existing_messages(output), merged)
 
     def test_merge_messages_deduplicates_existing_duplicates(self):
@@ -160,6 +173,48 @@ class ExportConfigTests(unittest.TestCase):
         self.assertEqual(added, 1)
         self.assertEqual(skipped, 1)
         self.assertEqual([item["delete_event_id"] for item in merged], [1, 2])
+
+    def test_sort_messages_by_message_date(self):
+        messages = [
+            {"message_id": 2, "message_date": "2026-01-02 00:00:00+00:00"},
+            {"message_id": 1, "message_date": "2026-01-01 00:00:00+00:00"},
+        ]
+
+        result = sort_messages(messages, "message-date", "asc")
+
+        self.assertEqual([message["message_id"] for message in result], [1, 2])
+
+    def test_write_export_sorts_incremental_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "deleted.json"
+            output.write_text(
+                '[{"delete_event_id": 2, "message_date": "2026-01-02"}]',
+                encoding="utf-8",
+            )
+            config_file = self.write_config(tmp)
+            parser = build_parser()
+
+            with patch.dict(os.environ, {}, clear=True):
+                config = load_config(
+                    parser.parse_args(
+                        [
+                            "--config",
+                            str(config_file),
+                            "--incremental",
+                            "--sort-by",
+                            "message-date",
+                            "--output",
+                            str(output),
+                        ]
+                    )
+                )
+
+            merged, _, _ = write_export(
+                config,
+                [{"delete_event_id": 1, "message_date": "2026-01-01"}],
+            )
+
+            self.assertEqual([message["delete_event_id"] for message in merged], [1, 2])
 
     def test_smoke_test_main_builds_small_export_config(self):
         with tempfile.TemporaryDirectory() as tmp:

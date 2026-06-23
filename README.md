@@ -48,6 +48,8 @@ telegram-deleted-export --incremental --all --with-links
 telegram-deleted-export --sender-id 123456789 --deleted-by 987654321
 telegram-deleted-export --has-media
 telegram-deleted-export --has-links --with-links
+telegram-deleted-export --all --with-links --sort-by message-date
+telegram-deleted-export --all --resolve-users
 ```
 
 `--all` sets the minimum text length to `0`. `--text-only` skips media-only
@@ -57,6 +59,9 @@ messages. `--with-links` adds extracted links to each JSON item.
 `delete_event_id` values.
 `--sender-id`, `--deleted-by`, `--has-media`, and `--has-links` filter the
 deleted messages that are exported.
+`--sort-by message-date` writes the JSON in original message date order.
+`--resolve-users` adds current usernames and display names for message senders
+and deleters when Telegram can resolve those ids.
 
 ## Diagnostics
 

@@ -21,6 +21,14 @@ class FakeMedia:
     pass
 
 
+class FakeUser:
+    def __init__(self, user_id, username=None, first_name=None, last_name=None):
+        self.id = user_id
+        self.username = username
+        self.first_name = first_name
+        self.last_name = last_name
+
+
 class FakeMessage:
     def __init__(self, message_id, text, media=None, sender=777, links=None):
         self.id = message_id
@@ -43,13 +51,22 @@ class FakeEvent:
 
 
 class FakeClient:
-    def __init__(self, events):
+    def __init__(self, events, entities=None):
         self.events = events
         self.downloads = []
+        self.entities = entities or {}
+        self.get_entity_calls = []
 
     def iter_admin_log(self, entity, limit, delete):
         self.iter_args = (entity, limit, delete)
         return iter(self.events[:limit])
+
+    def get_entity(self, entity_id):
+        self.get_entity_calls.append(entity_id)
+        entity = self.entities.get(entity_id)
+        if isinstance(entity, Exception):
+            raise entity
+        return entity
 
     def download_media(self, message, file):
         self.downloads.append((message.id, file))
@@ -77,6 +94,9 @@ class ExportCollectionTests(unittest.TestCase):
             "deleted_by": None,
             "has_media": False,
             "has_links": False,
+            "sort_by": "none",
+            "sort_order": "asc",
+            "resolve_users": False,
         }
         values.update(overrides)
         return ExportConfig(**values)
@@ -243,6 +263,49 @@ class ExportCollectionTests(unittest.TestCase):
         )
 
         self.assertEqual(result[0]["links"][0]["url"], "https://example.com")
+
+    def test_resolve_users_adds_sender_and_deleter_summaries(self):
+        client = FakeClient(
+            [FakeEvent(1, FakeMessage(10, "hello", sender=111), deleted_by=222)],
+            entities={
+                111: FakeUser(111, username="sender", first_name="Send", last_name="Er"),
+                222: FakeUser(222, username="admin", first_name="Admin"),
+            },
+        )
+
+        result = self.collect_quietly(
+            client,
+            "entity",
+            self.make_config(min_text_length=0, resolve_users=True),
+        )
+
+        self.assertEqual(result[0]["sender"]["username"], "sender")
+        self.assertEqual(result[0]["sender"]["display_name"], "Send Er")
+        self.assertEqual(result[0]["deleted_by_user"]["username"], "admin")
+        self.assertEqual(client.get_entity_calls, [111, 222])
+
+    def test_resolve_users_caches_entities_and_records_errors(self):
+        client = FakeClient(
+            [
+                FakeEvent(1, FakeMessage(10, "first", sender=111), deleted_by=222),
+                FakeEvent(2, FakeMessage(11, "second", sender=111), deleted_by=333),
+            ],
+            entities={
+                111: FakeUser(111, username="sender"),
+                222: FakeUser(222, username="admin"),
+                333: ValueError("not found"),
+            },
+        )
+
+        result = self.collect_quietly(
+            client,
+            "entity",
+            self.make_config(min_text_length=0, resolve_users=True),
+        )
+
+        self.assertEqual(client.get_entity_calls, [111, 222, 333])
+        self.assertEqual(result[1]["sender"]["username"], "sender")
+        self.assertIn("ValueError", result[1]["deleted_by_user"]["resolve_error"])
 
 
 if __name__ == "__main__":

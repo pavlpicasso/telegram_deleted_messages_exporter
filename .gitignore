@@ -18,6 +18,7 @@ config/*.session-wal
 
 # Exported data
 deleted_*.json
+_deleted_*.json
 telegram_messages*.txt
 downloads/
 media/
