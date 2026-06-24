@@ -22,6 +22,7 @@ _deleted_*.json
 telegram_messages*.txt
 downloads/
 media/
+state/
 *.log
 
 # Python

@@ -7,10 +7,16 @@ from unittest.mock import patch
 from telegram_deleted_messages.export import (
     bool_env,
     build_parser,
+    default_checkpoint_file,
+    default_output_file,
     load_config,
+    load_checkpoint,
     load_env_file,
     load_existing_messages,
     merge_messages,
+    parse_events,
+    safe_filename_part,
+    save_checkpoint,
     sort_messages,
     smoke_test_main,
     write_export,
@@ -29,7 +35,8 @@ class ExportConfigTests(unittest.TestCase):
                     "TELEGRAM_SESSION=config/test_session",
                     "TELEGRAM_ADMIN_LOG_LIMIT=250",
                     "TELEGRAM_MIN_TEXT_LENGTH=42",
-                    "TELEGRAM_OUTPUT_FILE=deleted_test.json",
+                    "TELEGRAM_OUTPUT_FILE=",
+                    "TELEGRAM_EVENTS=delete",
                     "TELEGRAM_INCREMENTAL=false",
                     "TELEGRAM_SENDER_ID=",
                     "TELEGRAM_DELETED_BY=",
@@ -38,6 +45,8 @@ class ExportConfigTests(unittest.TestCase):
                     "TELEGRAM_SORT_BY=none",
                     "TELEGRAM_SORT_ORDER=asc",
                     "TELEGRAM_RESOLVE_USERS=false",
+                    "TELEGRAM_CHECKPOINT=false",
+                    "TELEGRAM_CHECKPOINT_FILE=",
                     extra,
                 ]
             ),
@@ -67,8 +76,25 @@ class ExportConfigTests(unittest.TestCase):
             self.assertEqual(config.chat, "@test_chat")
             self.assertEqual(config.limit, 250)
             self.assertEqual(config.min_text_length, 42)
-            self.assertEqual(config.output_file, Path("deleted_test.json"))
+            self.assertEqual(config.output_file, Path("test_chat_admin_log.json"))
             self.assertEqual(config.session, Path("config/test_session"))
+
+    def test_default_output_file_uses_safe_chat_name(self):
+        self.assertEqual(default_output_file("@test/chat"), Path("test_chat_admin_log.json"))
+        self.assertEqual(safe_filename_part("@group.name"), "group.name")
+        self.assertEqual(
+            default_checkpoint_file("@test/chat"),
+            Path("state/test_chat_checkpoint.json"),
+        )
+
+    def test_checkpoint_read_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "checkpoint.json"
+
+            self.assertEqual(load_checkpoint(path), 0)
+            save_checkpoint(path, 123)
+
+            self.assertEqual(load_checkpoint(path), 123)
 
     def test_cli_flags_override_export_modes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -93,11 +119,16 @@ class ExportConfigTests(unittest.TestCase):
                     "222",
                     "--has-media",
                     "--has-links",
+                    "--events",
+                    "delete,edit",
                     "--sort-by",
                     "message-date",
                     "--sort-order",
                     "desc",
                     "--resolve-users",
+                    "--checkpoint",
+                    "--checkpoint-file",
+                    "state/custom.json",
                 ]
             )
 
@@ -115,14 +146,21 @@ class ExportConfigTests(unittest.TestCase):
             self.assertEqual(config.deleted_by, 222)
             self.assertTrue(config.has_media)
             self.assertTrue(config.has_links)
+            self.assertEqual(config.events, ("delete", "edit"))
             self.assertEqual(config.sort_by, "message-date")
             self.assertEqual(config.sort_order, "desc")
             self.assertTrue(config.resolve_users)
+            self.assertTrue(config.checkpoint)
+            self.assertEqual(config.checkpoint_file, Path("state/custom.json"))
 
     def test_bool_env_rejects_invalid_values(self):
         with patch.dict(os.environ, {"TELEGRAM_WITH_LINKS": "maybe"}, clear=True):
             with self.assertRaises(SystemExit):
                 bool_env("TELEGRAM_WITH_LINKS")
+
+    def test_parse_events_rejects_unknown_event(self):
+        with self.assertRaises(SystemExit):
+            parse_events("delete,join")
 
     def test_incremental_write_merges_existing_export(self):
         with tempfile.TemporaryDirectory() as tmp:

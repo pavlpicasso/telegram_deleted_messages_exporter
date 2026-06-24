@@ -50,6 +50,17 @@ class FakeEvent:
         self.action = types.ChannelAdminLogEventActionDeleteMessage(message)
 
 
+class FakeEditEvent:
+    def __init__(self, event_id, prev_message, new_message, edited_by=999):
+        self.id = event_id
+        self.date = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        self.user_id = edited_by
+        self.action = types.ChannelAdminLogEventActionEditMessage(
+            prev_message,
+            new_message,
+        )
+
+
 class FakeClient:
     def __init__(self, events, entities=None):
         self.events = events
@@ -57,8 +68,8 @@ class FakeClient:
         self.entities = entities or {}
         self.get_entity_calls = []
 
-    def iter_admin_log(self, entity, limit, delete):
-        self.iter_args = (entity, limit, delete)
+    def iter_admin_log(self, entity, limit, min_id=0, delete=False, edit=False):
+        self.iter_args = (entity, limit, min_id, delete, edit)
         return iter(self.events[:limit])
 
     def get_entity(self, entity_id):
@@ -97,6 +108,9 @@ class ExportCollectionTests(unittest.TestCase):
             "sort_by": "none",
             "sort_order": "asc",
             "resolve_users": False,
+            "events": ("delete",),
+            "checkpoint": False,
+            "checkpoint_file": Path("state/test_checkpoint.json"),
         }
         values.update(overrides)
         return ExportConfig(**values)
@@ -115,7 +129,7 @@ class ExportCollectionTests(unittest.TestCase):
 
         result = self.collect_quietly(client, "entity", self.make_config())
 
-        self.assertEqual(client.iter_args, ("entity", 100, True))
+        self.assertEqual(client.iter_args, ("entity", 100, 0, True, False))
         self.assertEqual([item["message_id"] for item in result], [10])
         self.assertNotIn("links", result[0])
 
@@ -306,6 +320,81 @@ class ExportCollectionTests(unittest.TestCase):
         self.assertEqual(client.get_entity_calls, [111, 222, 333])
         self.assertEqual(result[1]["sender"]["username"], "sender")
         self.assertIn("ValueError", result[1]["deleted_by_user"]["resolve_error"])
+
+    def test_edit_event_exports_previous_and_new_text(self):
+        client = FakeClient(
+            [
+                FakeEditEvent(
+                    1,
+                    FakeMessage(10, "before", sender=111),
+                    FakeMessage(10, "after", sender=111),
+                    edited_by=222,
+                )
+            ]
+        )
+
+        result = self.collect_quietly(
+            client,
+            "entity",
+            self.make_config(min_text_length=0, events=("edit",)),
+        )
+
+        self.assertEqual(client.iter_args, ("entity", 100, 0, False, True))
+        self.assertEqual(result[0]["event_type"], "edit")
+        self.assertEqual(result[0]["prev_text"], "before")
+        self.assertEqual(result[0]["new_text"], "after")
+        self.assertEqual(result[0]["edited_by"], 222)
+        self.assertEqual(result[0]["text_diff"]["format"], "unified")
+        self.assertIn("-before", result[0]["text_diff"]["lines"])
+        self.assertIn("+after", result[0]["text_diff"]["lines"])
+        self.assertEqual(result[0]["text_diff"]["added_lines"], 1)
+        self.assertEqual(result[0]["text_diff"]["removed_lines"], 1)
+
+    def test_delete_and_edit_events_can_be_exported_together(self):
+        client = FakeClient(
+            [
+                FakeEvent(1, FakeMessage(10, "deleted")),
+                FakeEditEvent(
+                    2,
+                    FakeMessage(11, "old"),
+                    FakeMessage(11, "new"),
+                ),
+            ]
+        )
+
+        result = self.collect_quietly(
+            client,
+            "entity",
+            self.make_config(min_text_length=0, events=("delete", "edit")),
+        )
+
+        self.assertEqual(client.iter_args, ("entity", 100, 0, True, True))
+        self.assertEqual([item["event_type"] for item in result], ["delete", "edit"])
+
+    def test_checkpoint_min_id_is_passed_and_saved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "checkpoint.json"
+            checkpoint.write_text('{"last_event_id": 5}', encoding="utf-8")
+            client = FakeClient(
+                [
+                    FakeEvent(6, FakeMessage(10, "first")),
+                    FakeEvent(8, FakeMessage(11, "second")),
+                ]
+            )
+
+            result = self.collect_quietly(
+                client,
+                "entity",
+                self.make_config(
+                    min_text_length=0,
+                    checkpoint=True,
+                    checkpoint_file=checkpoint,
+                ),
+            )
+
+            self.assertEqual(client.iter_args, ("entity", 100, 5, True, False))
+            self.assertEqual([item["event_id"] for item in result], [6, 8])
+            self.assertIn('"last_event_id": 8', checkpoint.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

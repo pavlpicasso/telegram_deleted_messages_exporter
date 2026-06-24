@@ -38,27 +38,57 @@ build outputs are ignored by git.
 .\.venv\Scripts\python -m telegram_deleted_messages.formatter --source deleted_messages.json
 ```
 
+By default, export files include the chat name, for example
+`your_group_or_channel_admin_log.json`. Use `--output` to override it.
+
 Useful export flags:
 
 ```powershell
-telegram-deleted-export --all --with-links
-telegram-deleted-export --text-only --min-text-length 20
-telegram-deleted-export --all --download-media --media-dir media
-telegram-deleted-export --incremental --all --with-links
-telegram-deleted-export --sender-id 123456789 --deleted-by 987654321
-telegram-deleted-export --has-media
-telegram-deleted-export --has-links --with-links
-telegram-deleted-export --all --with-links --sort-by message-date
-telegram-deleted-export --all --resolve-users
+telegram-admin-log-export --all --with-links
+telegram-admin-log-export --events edit --all --with-links
+telegram-admin-log-export --events delete,edit --all --resolve-users
+telegram-admin-log-export --text-only --min-text-length 20
+telegram-admin-log-export --all --download-media --media-dir media
+telegram-admin-log-export --incremental --all --with-links
+telegram-admin-log-export --checkpoint --incremental --events delete,edit --all
+telegram-admin-log-export --sender-id 123456789 --deleted-by 987654321
+telegram-admin-log-export --has-media
+telegram-admin-log-export --has-links --with-links
+telegram-admin-log-export --all --with-links --sort-by message-date
+telegram-admin-log-export --all --resolve-users
+```
+
+Full export example:
+
+```powershell
+telegram-admin-log-export `
+  --config config/secrets.env `
+  --chat @your_group_or_channel `
+  --session config/session `
+  --events delete,edit `
+  --all `
+  --with-links `
+  --resolve-users `
+  --incremental `
+  --checkpoint `
+  --sort-by message-date `
+  --sort-order asc `
+  --output your_group_or_channel_admin_log.json
 ```
 
 `--all` sets the minimum text length to `0`. `--text-only` skips media-only
 messages. `--with-links` adds extracted links to each JSON item.
+`--events delete`, `--events edit`, and `--events delete,edit` choose which
+admin-log message events to export. Edit records include `prev_text`,
+`new_text`, and a unified `text_diff`.
 `--download-media` saves available media files and writes their paths to JSON.
 `--incremental` merges with the existing output file and skips duplicate
 `delete_event_id` values.
+`--checkpoint` stores the last processed admin-log `event_id` in an ignored
+state file and resumes from it on the next run.
 `--sender-id`, `--deleted-by`, `--has-media`, and `--has-links` filter the
-deleted messages that are exported.
+message events that are exported. For edit events, `--deleted-by` matches the
+admin-log actor that edited the message.
 `--sort-by message-date` writes the JSON in original message date order.
 `--resolve-users` adds current usernames and display names for message senders
 and deleters when Telegram can resolve those ids.
@@ -90,9 +120,12 @@ After editable install, the same tools are available as console commands:
 
 ```powershell
 .\.venv\Scripts\python -m pip install -e .
+telegram-admin-log-export
 telegram-deleted-export
 telegram-format-messages --source deleted_messages.json
 ```
+
+`telegram-deleted-export` remains as a compatibility alias.
 
 ## Tests
 

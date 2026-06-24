@@ -1,6 +1,8 @@
 import argparse
+import difflib
 import json
 import os
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -30,6 +32,9 @@ class ExportConfig:
     sort_by: str
     sort_order: str
     resolve_users: bool
+    events: tuple[str, ...]
+    checkpoint: bool
+    checkpoint_file: Path
 
 
 def load_env_file(path):
@@ -91,6 +96,54 @@ def bool_env(name, default=False):
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise SystemExit(f"Invalid {name}: expected true or false.")
+
+
+def parse_events(value):
+    allowed = {"delete", "edit"}
+    events = tuple(part.strip().lower() for part in value.split(",") if part.strip())
+    if not events:
+        raise SystemExit("Invalid events: expected delete, edit, or delete,edit.")
+
+    invalid = sorted(set(events) - allowed)
+    if invalid:
+        raise SystemExit(f"Invalid events: {', '.join(invalid)}.")
+
+    return tuple(dict.fromkeys(events))
+
+
+def safe_filename_part(value):
+    value = value.strip().lstrip("@")
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
+    value = value.strip("._-")
+    return value or "chat"
+
+
+def default_output_file(chat):
+    return Path(f"{safe_filename_part(chat)}_admin_log.json")
+
+
+def default_checkpoint_file(chat):
+    return Path("state") / f"{safe_filename_part(chat)}_checkpoint.json"
+
+
+def load_checkpoint(path):
+    if not path.exists():
+        return 0
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return int(data.get("last_event_id") or 0)
+    except (AttributeError, TypeError, ValueError):
+        raise SystemExit(f"Invalid checkpoint file: {path}")
+
+
+def save_checkpoint(path, last_event_id):
+    if path.parent != Path("."):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"last_event_id": last_event_id}, ensure_ascii=False, indent=4),
+        encoding="utf-8",
+    )
 
 
 def ask_phone():
@@ -190,6 +243,8 @@ def extract_links(message):
 
     links = []
     seen = set()
+    if message is None:
+        return links
 
     for entity, inner_text in message.get_entities_text():
         if isinstance(entity, types.MessageEntityTextUrl):
@@ -256,6 +311,153 @@ def download_message_media(client, message, media_dir):
     }
 
 
+def action_message(action):
+    return getattr(action, "message", None) or getattr(action, "new_message", None)
+
+
+def message_text(message):
+    if message is None:
+        return ""
+    return message.message or ""
+
+
+def event_matches_text_filters(config, text, has_text, has_media):
+    if config.text_only and not has_text:
+        return False
+    include_for_media_download = config.download_media and has_media
+    return len(text) >= config.min_text_length or include_for_media_download
+
+
+def message_matches_export_filters(
+    config,
+    event,
+    current_sender_id,
+    has_media,
+    links,
+):
+    if config.sender_id is not None and current_sender_id != config.sender_id:
+        return False
+    if config.deleted_by is not None and event.user_id != config.deleted_by:
+        return False
+    if config.has_media and not has_media:
+        return False
+    if config.has_links and not links:
+        return False
+    return True
+
+
+def base_message_item(event, message, current_sender_id, text, has_media):
+    return {
+        "event_id": event.id,
+        "admin_log_event_id": event.id,
+        "event_at": str(event.date),
+        "actor_id": event.user_id,
+        "message_id": message.id,
+        "message_date": str(message.date),
+        "sender_id": current_sender_id,
+        "text_length": len(text),
+        "text": text,
+        "has_media": has_media,
+    }
+
+
+def add_resolved_users(item, client, sender, actor_id, cache):
+    item["sender"] = resolve_entity(client, sender, cache)
+    item["actor"] = resolve_entity(client, actor_id, cache)
+
+
+def build_delete_item(client, event, message, config, entity_cache, links):
+    text = message_text(message)
+    current_sender_id = sender_id(message)
+    has_media = getattr(message, "media", None) is not None
+
+    item = base_message_item(event, message, current_sender_id, text, has_media)
+    item.update(
+        {
+            "event_type": "delete",
+            "delete_event_id": event.id,
+            "deleted_at": str(event.date),
+            "deleted_by": event.user_id,
+        }
+    )
+
+    if config.resolve_users:
+        add_resolved_users(item, client, current_sender_id, event.user_id, entity_cache)
+        item["deleted_by_user"] = item["actor"]
+
+    media = media_summary(message)
+    if media is not None:
+        item["media"] = media
+    if config.with_links:
+        item["links"] = links or []
+
+    return item
+
+
+def text_diff(prev_text, new_text):
+    diff_lines = list(
+        difflib.unified_diff(
+            prev_text.splitlines(),
+            new_text.splitlines(),
+            fromfile="prev_text",
+            tofile="new_text",
+            lineterm="",
+        )
+    )
+    added_lines = sum(
+        1 for line in diff_lines if line.startswith("+") and not line.startswith("+++")
+    )
+    removed_lines = sum(
+        1 for line in diff_lines if line.startswith("-") and not line.startswith("---")
+    )
+    return {
+        "format": "unified",
+        "lines": diff_lines,
+        "added_lines": added_lines,
+        "removed_lines": removed_lines,
+    }
+
+
+def build_edit_item(client, event, action, config, entity_cache, links):
+    prev_message = getattr(action, "prev_message", None)
+    new_message = getattr(action, "new_message", None)
+    message = new_message or prev_message
+    prev_text = message_text(prev_message)
+    new_text = message_text(new_message)
+    text = new_text or prev_text
+    current_sender_id = sender_id(message)
+    has_media = getattr(message, "media", None) is not None
+
+    item = base_message_item(event, message, current_sender_id, text, has_media)
+    item.update(
+        {
+            "event_type": "edit",
+            "edited_at": str(event.date),
+            "edited_by": event.user_id,
+            "prev_text": prev_text,
+            "new_text": new_text,
+            "prev_text_length": len(prev_text),
+            "new_text_length": len(new_text),
+            "text_diff": text_diff(prev_text, new_text),
+        }
+    )
+
+    if config.resolve_users:
+        add_resolved_users(item, client, current_sender_id, event.user_id, entity_cache)
+        item["edited_by_user"] = item["actor"]
+
+    media = media_summary(message)
+    if media is not None:
+        item["media"] = media
+    if config.with_links:
+        prev_links, new_links = links or ([], [])
+        item["prev_links"] = prev_links
+        item["new_links"] = new_links
+        item["links"] = new_links
+
+    return item
+
+
 def collect_deleted_messages(
     client,
     entity,
@@ -263,103 +465,119 @@ def collect_deleted_messages(
 ):
     from telethon import types
 
-    print(f"Loading deleted-message events from {config.chat}...")
-    deleted_messages = []
+    print(f"Loading admin-log events from {config.chat}: {', '.join(config.events)}...")
+    exported_messages = []
     checked_events = 0
-    checked_deleted_messages = 0
+    checked_matching_events = 0
     skipped_by_text_filter = 0
     skipped_by_export_filter = 0
     entity_cache = {}
+    checkpoint_event_id = load_checkpoint(config.checkpoint_file) if config.checkpoint else 0
+    max_seen_event_id = checkpoint_event_id
+    if config.checkpoint:
+        print(f"Checkpoint min event id: {checkpoint_event_id}")
 
-    for event in client.iter_admin_log(entity, limit=config.limit, delete=True):
+    for event in client.iter_admin_log(
+        entity,
+        limit=config.limit,
+        min_id=checkpoint_event_id,
+        delete="delete" in config.events,
+        edit="edit" in config.events,
+    ):
         checked_events += 1
+        max_seen_event_id = max(max_seen_event_id, event.id)
         action = event.action
-
-        if not isinstance(action, types.ChannelAdminLogEventActionDeleteMessage):
+        is_delete = isinstance(action, types.ChannelAdminLogEventActionDeleteMessage)
+        is_edit = isinstance(action, types.ChannelAdminLogEventActionEditMessage)
+        if (is_delete and "delete" not in config.events) or (
+            is_edit and "edit" not in config.events
+        ):
+            continue
+        if not is_delete and not is_edit:
             continue
 
-        message = getattr(action, "message", None)
+        message = action_message(action)
         if message is None:
             continue
 
-        checked_deleted_messages += 1
-        text = message.message or ""
+        checked_matching_events += 1
+        if is_edit:
+            prev_text = message_text(getattr(action, "prev_message", None))
+            new_text = message_text(getattr(action, "new_message", None))
+            text = new_text if len(new_text) >= len(prev_text) else prev_text
+        else:
+            text = message_text(message)
+
         current_sender_id = sender_id(message)
         has_text = bool(text.strip())
         has_media = getattr(message, "media", None) is not None
 
-        if config.text_only and not has_text:
+        if not event_matches_text_filters(config, text, has_text, has_media):
             skipped_by_text_filter += 1
-            continue
-        include_for_media_download = config.download_media and has_media
-        if len(text) < config.min_text_length and not include_for_media_download:
-            skipped_by_text_filter += 1
-            continue
-
-        if config.sender_id is not None and current_sender_id != config.sender_id:
-            skipped_by_export_filter += 1
-            continue
-        if config.deleted_by is not None and event.user_id != config.deleted_by:
-            skipped_by_export_filter += 1
-            continue
-        if config.has_media and not has_media:
-            skipped_by_export_filter += 1
             continue
 
         links = None
-        if config.with_links or config.has_links:
+        if is_edit and (config.with_links or config.has_links):
+            prev_links = extract_links(getattr(action, "prev_message", None))
+            new_links = extract_links(getattr(action, "new_message", None))
+            links = (prev_links, new_links)
+            filter_links = prev_links or new_links
+        elif config.with_links or config.has_links:
             links = extract_links(message)
-        if config.has_links and not links:
+            filter_links = links
+        else:
+            filter_links = None
+
+        if not message_matches_export_filters(
+            config,
+            event,
+            current_sender_id,
+            has_media,
+            filter_links,
+        ):
             skipped_by_export_filter += 1
             continue
 
-        media_result = None
         if config.download_media:
             media_result = download_message_media(client, message, config.media_dir)
+        else:
+            media_result = None
 
-        item = {
-            "delete_event_id": event.id,
-            "deleted_at": str(event.date),
-            "deleted_by": event.user_id,
-            "message_id": message.id,
-            "message_date": str(message.date),
-            "sender_id": current_sender_id,
-            "text_length": len(text),
-            "text": text,
-            "has_media": has_media,
-        }
+        if is_edit:
+            item = build_edit_item(client, event, action, config, entity_cache, links)
+        else:
+            item = build_delete_item(client, event, message, config, entity_cache, links)
+        if media_result is not None:
+            item["media"] = media_summary(message, media_result)
 
-        if config.resolve_users:
-            item["sender"] = resolve_entity(client, current_sender_id, entity_cache)
-            item["deleted_by_user"] = resolve_entity(client, event.user_id, entity_cache)
+        exported_messages.append(item)
 
-        media = media_summary(message, media_result)
-        if media is not None:
-            item["media"] = media
-        if config.with_links:
-            item["links"] = links or []
+        if len(exported_messages) % 100 == 0:
+            print(f"Exported admin-log records: {len(exported_messages)}")
 
-        deleted_messages.append(item)
-
-        if len(deleted_messages) % 100 == 0:
-            print(f"Found deleted messages: {len(deleted_messages)}")
-
-        if checked_deleted_messages % 1000 == 0:
+        if checked_matching_events % 1000 == 0:
             print(
-                f"Checked deleted messages: {checked_deleted_messages}; "
-                f"exported: {len(deleted_messages)}"
+                f"Checked matching admin-log events: {checked_matching_events}; "
+                f"exported: {len(exported_messages)}"
             )
 
     print(f"Checked admin-log events: {checked_events}")
-    print(f"Checked deleted messages: {checked_deleted_messages}")
+    print(f"Checked matching admin-log events: {checked_matching_events}")
     print(f"Skipped by text filter: {skipped_by_text_filter}")
     print(f"Skipped by export filters: {skipped_by_export_filter}")
     print(f"Minimum text length: {config.min_text_length}")
+    if config.checkpoint and max_seen_event_id > checkpoint_event_id:
+        save_checkpoint(config.checkpoint_file, max_seen_event_id)
+        print(f"Checkpoint saved: {max_seen_event_id}")
 
-    return deleted_messages
+    return exported_messages
 
 
 def message_key(message):
+    key = message.get("event_id")
+    if key is not None:
+        return ("event_id", key)
+
     key = message.get("delete_event_id")
     if key is not None:
         return ("delete_event_id", key)
@@ -410,9 +628,9 @@ def sort_key(message, sort_by):
     if sort_by == "message-date":
         return message.get("message_date") or ""
     if sort_by == "deleted-at":
-        return message.get("deleted_at") or ""
+        return message.get("deleted_at") or message.get("edited_at") or message.get("event_at") or ""
     if sort_by == "event-id":
-        return message.get("delete_event_id") or 0
+        return message.get("event_id") or message.get("delete_event_id") or 0
     if sort_by == "message-id":
         return message.get("message_id") or 0
     return 0
@@ -476,9 +694,15 @@ def build_parser():
         help="Export all deleted messages, including short and media-only messages.",
     )
     parser.add_argument(
+        "--events",
+        "--event",
+        default=os.environ.get("TELEGRAM_EVENTS"),
+        help="Admin-log event types to export: delete, edit, or delete,edit.",
+    )
+    parser.add_argument(
         "--text-only",
         action="store_true",
-        help="Export only deleted messages that contain text.",
+        help="Export only message events that contain text.",
     )
     parser.add_argument(
         "--with-links",
@@ -503,17 +727,17 @@ def build_parser():
     parser.add_argument(
         "--deleted-by",
         type=int,
-        help="Export only messages deleted by this Telegram user id.",
+        help="Export only messages deleted/edited by this Telegram user id.",
     )
     parser.add_argument(
         "--has-media",
         action="store_true",
-        help="Export only deleted messages that include media.",
+        help="Export only message events that include media.",
     )
     parser.add_argument(
         "--has-links",
         action="store_true",
-        help="Export only deleted messages that include links.",
+        help="Export only message events that include links.",
     )
     parser.add_argument(
         "--media-dir",
@@ -534,6 +758,15 @@ def build_parser():
         action="store_true",
         help="Resolve sender and deleter ids to usernames/display names when possible.",
     )
+    parser.add_argument(
+        "--checkpoint",
+        action="store_true",
+        help="Resume from the last processed admin-log event id.",
+    )
+    parser.add_argument(
+        "--checkpoint-file",
+        help="Path to checkpoint state file.",
+    )
     parser.add_argument("--output", help="JSON output path.")
     parser.add_argument("--session", help="Telethon session path without extension.")
     return parser
@@ -542,6 +775,8 @@ def build_parser():
 def load_config(args):
     config_file = Path(args.config)
     load_env_file(config_file)
+    chat = args.chat or required_env("TELEGRAM_CHAT", config_file)
+    output_file = args.output or os.environ.get("TELEGRAM_OUTPUT_FILE") or None
     min_text_length = (
         0
         if args.all
@@ -554,14 +789,12 @@ def load_config(args):
     return ExportConfig(
         api_id=api_id,
         api_hash=required_env("TELEGRAM_API_HASH", config_file),
-        chat=args.chat or required_env("TELEGRAM_CHAT", config_file),
+        chat=chat,
         limit=args.limit
         if args.limit is not None
         else int_env("TELEGRAM_ADMIN_LOG_LIMIT", "100000"),
         min_text_length=min_text_length,
-        output_file=Path(
-            args.output or os.environ.get("TELEGRAM_OUTPUT_FILE", "deleted_messages.json")
-        ),
+        output_file=Path(output_file) if output_file else default_output_file(chat),
         session=Path(args.session or os.environ.get("TELEGRAM_SESSION", "config/session")),
         config_file=config_file,
         text_only=args.text_only or bool_env("TELEGRAM_TEXT_ONLY"),
@@ -580,6 +813,13 @@ def load_config(args):
         sort_by=args.sort_by or os.environ.get("TELEGRAM_SORT_BY", "none"),
         sort_order=args.sort_order or os.environ.get("TELEGRAM_SORT_ORDER", "asc"),
         resolve_users=args.resolve_users or bool_env("TELEGRAM_RESOLVE_USERS"),
+        events=parse_events(args.events or os.environ.get("TELEGRAM_EVENTS", "delete")),
+        checkpoint=args.checkpoint or bool_env("TELEGRAM_CHECKPOINT"),
+        checkpoint_file=Path(
+            args.checkpoint_file
+            or os.environ.get("TELEGRAM_CHECKPOINT_FILE")
+            or default_checkpoint_file(chat)
+        ),
     )
 
 
@@ -612,7 +852,7 @@ def export_deleted_messages(config):
             print(f"Getting chat {config.chat}...")
             entity = client.get_entity(config.chat)
 
-            deleted_messages = collect_deleted_messages(
+            admin_log_records = collect_deleted_messages(
                 client,
                 entity,
                 config,
@@ -620,7 +860,7 @@ def export_deleted_messages(config):
 
             exported_messages, added, duplicate_count = write_export(
                 config,
-                deleted_messages,
+                admin_log_records,
             )
 
     except ChatAdminRequiredError:
@@ -636,7 +876,7 @@ def export_deleted_messages(config):
     except RPCError as exc:
         raise SystemExit(f"Telegram API error: {type(exc).__name__}: {exc}")
 
-    print(f"Exported deleted messages this run: {len(deleted_messages)}")
+    print(f"Exported admin-log records this run: {len(admin_log_records)}")
     if config.incremental:
         print(f"New messages added: {added}")
         print(f"Duplicates merged/skipped: {duplicate_count}")
