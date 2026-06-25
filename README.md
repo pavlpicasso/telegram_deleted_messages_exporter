@@ -76,6 +76,17 @@ telegram-admin-log-export `
   --output your_group_or_channel_admin_log.json
 ```
 
+Format an existing JSON export:
+
+```powershell
+telegram-format-messages --source your_group_or_channel_admin_log.json --format txt
+telegram-format-messages --source your_group_or_channel_admin_log.json --format md --output report.md
+telegram-format-messages --source your_group_or_channel_admin_log.json --format html --output report.html
+```
+
+Markdown and HTML reports include delete/edit metadata, resolved users when
+present, links, and edit diffs.
+
 `--all` sets the minimum text length to `0`. `--text-only` skips media-only
 messages. `--with-links` adds extracted links to each JSON item.
 `--events delete`, `--events edit`, and `--events delete,edit` choose which
@@ -90,8 +101,10 @@ state file and resumes from it on the next run.
 message events that are exported. For edit events, `--deleted-by` matches the
 admin-log actor that edited the message.
 `--sort-by message-date` writes the JSON in original message date order.
-`--resolve-users` adds current usernames and display names for message senders
-and deleters when Telegram can resolve those ids.
+`--resolve-users` adds current names and Telegram usernames for message senders
+and deleters when Telegram can resolve those ids. Resolved user objects include
+`name`, `display_name`, `username`, and `nick` fields; `nick` is stored with the
+leading `@`.
 
 ## Diagnostics
 

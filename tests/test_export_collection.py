@@ -294,8 +294,11 @@ class ExportCollectionTests(unittest.TestCase):
         )
 
         self.assertEqual(result[0]["sender"]["username"], "sender")
+        self.assertEqual(result[0]["sender"]["nick"], "@sender")
         self.assertEqual(result[0]["sender"]["display_name"], "Send Er")
+        self.assertEqual(result[0]["sender"]["name"], "Send Er")
         self.assertEqual(result[0]["deleted_by_user"]["username"], "admin")
+        self.assertEqual(result[0]["deleted_by_user"]["nick"], "@admin")
         self.assertEqual(client.get_entity_calls, [111, 222])
 
     def test_resolve_users_caches_entities_and_records_errors(self):

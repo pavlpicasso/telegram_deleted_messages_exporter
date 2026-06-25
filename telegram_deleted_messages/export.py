@@ -203,11 +203,15 @@ def display_name(entity):
 
 
 def entity_summary(entity_id, entity=None, resolve_error=None):
+    username = getattr(entity, "username", None) if entity is not None else None
+    name = display_name(entity) if entity is not None else None
     return {
         "id": entity_id,
         "type": type(entity).__name__ if entity is not None else None,
-        "username": getattr(entity, "username", None) if entity is not None else None,
-        "display_name": display_name(entity) if entity is not None else None,
+        "username": username,
+        "nick": f"@{username}" if username else None,
+        "display_name": name,
+        "name": name,
         "resolve_error": resolve_error,
     }
 

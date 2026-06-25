@@ -20,6 +20,10 @@ config/*.session-wal
 deleted_*.json
 _deleted_*.json
 telegram_messages*.txt
+telegram_messages*.md
+telegram_messages*.html
+report*.md
+report*.html
 downloads/
 media/
 state/
